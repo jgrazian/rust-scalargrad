@@ -2,33 +2,56 @@ use std::collections::HashSet;
 use std::ops;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::graph::*;
+use crate::arena::Arena;
 
-struct ScalarGraph {
-    inner: RwLock<Graph<ScalarData>>,
+/// An 'arena' to hold all [ScalarData] values of a model as a directed-acyclic graph
+///
+/// Thread safe with a RwLock. Use read() and write() to access internal [Graph].
+///
+/// # Examples
+///
+/// ```
+/// use ScalarGraph as sg;
+///
+/// sg::with(|g| {
+///    let a = g.scalar(3.0);
+///    let b = g.scalar(4.0);
+///    let c = a + b;
+///    assert_eq!(c.data(), 7.0);
+/// });
+/// ```
+pub struct ScalarGraph {
+    inner: RwLock<Arena<ScalarData>>,
 }
 
 impl ScalarGraph {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(Arena::new()),
+        }
+    }
+
     pub fn with<FN, R>(f: FN) -> R
     where
         FN: FnOnce(&mut ScalarGraph) -> R,
     {
-        let mut g = ScalarGraph {
-            inner: RwLock::new(Graph::new()),
+        let mut g = Self {
+            inner: RwLock::new(Arena::new()),
         };
         f(&mut g)
     }
 
-    fn read(&self) -> RwLockReadGuard<Graph<ScalarData>> {
+    fn read(&self) -> RwLockReadGuard<Arena<ScalarData>> {
         self.inner.read().unwrap()
     }
 
-    fn write(&self) -> RwLockWriteGuard<Graph<ScalarData>> {
+    fn write(&self) -> RwLockWriteGuard<Arena<ScalarData>> {
         self.inner.write().unwrap()
     }
 
+    /// Create a new [Scalar] associated with this graph.
     pub fn scalar(&self, data: f64) -> Scalar {
-        let id = self.inner.write().unwrap().push(ScalarData {
+        let id = self.write().push(ScalarData {
             data,
             grad: 0.0,
             op: Op::None,
@@ -38,7 +61,7 @@ impl ScalarGraph {
     }
 
     fn scalar_op(&self, data: f64, op: Op) -> Scalar {
-        let id = self.inner.write().unwrap().push(ScalarData {
+        let id = self.write().push(ScalarData {
             data,
             grad: 0.0,
             op,
@@ -48,8 +71,11 @@ impl ScalarGraph {
     }
 }
 
+/// The tier 1 operators for [Scalar].
+///
+/// In theory all other operations can be derived from these. Variants store indexes of parent nodes.
 #[derive(Copy, Clone, Debug)]
-enum Op {
+pub(crate) enum Op {
     None,
     Add(usize, usize),
     Mul(usize, usize),
@@ -83,15 +109,36 @@ impl Op {
     }
 }
 
+/// Holds the underlying data for [Scalar] pointers.
+///
+/// Stored in [ScalarGraph]
 #[derive(Copy, Clone, Debug)]
-pub struct ScalarData {
-    data: f64,
-    grad: f64,
-    op: Op,
+pub(crate) struct ScalarData {
+    pub(crate) data: f64,
+    pub(crate) grad: f64,
+    pub(crate) op: Op,
 }
 
+/// The basic unit of scalar gradient descent.
+///
+/// Serves as a drop-in replacement for a scalar value to do basic math with.
+/// Really is a pointer to a [ScalarData] living inside of a [ScalarGraph].
+/// Should not be directly instantiated issued via [ScalarGraph]
+///
+/// # Examples
+///
+/// ```
+/// use scalargrad::ScalarGraph;
+///
+/// let mut g = ScalarGraph::new();
+///
+/// let a = g.scalar(3.0); // <- a is a Scalar
+/// let b = g.scalar(4.0);
+/// let c = a + b;
+/// assert_eq!(c.data(), 7.0);
+/// ```
 #[derive(Copy, Clone)]
-struct Scalar<'g> {
+pub struct Scalar<'g> {
     id: usize,
     graph: &'g ScalarGraph,
 }
@@ -113,7 +160,7 @@ impl Scalar<'_> {
         self.graph.read().node(self.id).grad
     }
 
-    fn set_grad(&self, grad: f64) {
+    pub fn set_grad(&self, grad: f64) {
         self.graph.write().node_mut(self.id).grad = grad
     }
 
@@ -322,6 +369,7 @@ impl<'a> ops::Neg for &Scalar<'a> {
 #[cfg(test)]
 mod tests {
     use super::ScalarGraph as sg;
+    use super::*;
 
     #[test]
     fn add() {

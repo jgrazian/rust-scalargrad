@@ -1,4 +1,5 @@
-mod graph;
+mod arena;
+mod nn;
 mod scalar;
 
 #[cfg(test)]
